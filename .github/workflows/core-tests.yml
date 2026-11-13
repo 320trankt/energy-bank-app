@@ -1,0 +1,20 @@
+# Runs the EnergyBankKit unit tests (energy model, config, data model) on a GitHub-hosted Linux
+# runner. No Mac needed, so it runs on every pull request. Swift 6.3.2 is the Swift in the Mac
+# mini's Xcode 26.5 and the version the cloud environment installs, so all three agree.
+name: Core tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  swift-test:
+    runs-on: ubuntu-latest
+    container: swift:6.3.2-noble
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test
+        run: swift test --package-path EnergyBankKit
