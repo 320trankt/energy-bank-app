@@ -1,0 +1,141 @@
+# Builds Energy Bank on your own Mac (a self-hosted runner) and installs it on your iPhone.
+# This is bite-check's iOS workflow with the names changed (plus the job-level `if`), so both
+# can move to one shared workflow later. Setup is in docs/IOS_BUILD.md.
+#
+# Repository variables (Settings > Secrets and variables > Actions > Variables):
+#   APPLE_TEAM_ID  required: your 10-character Team ID. Until it's set the job is skipped, so
+#                  pushes don't queue for a runner that isn't registered yet.
+#   IPHONE_IDS     set to your own iPhone's UDID only: the app reads your health and Screen Time
+#                  data, so it shouldn't go to family phones. Unset, it installs on any connected
+#                  paired iPhone. (IPHONE_ID, a single UDID, still works.)
+#
+# It runs for pushes to main and manual runs (which can pick any branch), never for pull
+# requests, so code from other people's forks never runs on your Mac.
+name: iOS build
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**"]
+  workflow_dispatch:
+    inputs:
+      install:
+        description: "Install on the iPhone (untick to only build and test)"
+        type: boolean
+        default: true
+
+concurrency:
+  group: ios
+  cancel-in-progress: true
+
+env:
+  TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+  IPHONE_IDS: ${{ vars.IPHONE_IDS || vars.IPHONE_ID }}
+  SCHEME: EnergyBank
+
+jobs:
+  phone:
+    if: vars.APPLE_TEAM_ID != ''
+    runs-on: [self-hosted, macOS, energy-bank]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check setup
+        run: |
+          set -euo pipefail
+          if [ -z "$TEAM_ID" ]; then
+            echo "::error::Set the APPLE_TEAM_ID repository variable (see docs/IOS_BUILD.md)."; exit 1
+          fi
+          if ! command -v xcodegen >/dev/null; then
+            if command -v brew >/dev/null; then
+              brew install xcodegen
+            else
+              echo "::error::XcodeGen is missing and Homebrew isn't installed. Install XcodeGen (see docs/IOS_BUILD.md)."; exit 1
+            fi
+          fi
+          xcodegen --version
+          xcodebuild -version
+
+      - name: Unit tests
+        run: swift test --package-path EnergyBankKit
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Find the iPhones
+        if: github.event_name == 'push' || inputs.install
+        run: |
+          set -euo pipefail
+          ids="$(echo "$IPHONE_IDS" | tr ',' ' ' | xargs)"
+          if [ -z "$ids" ]; then
+            xcrun devicectl list devices --json-output "$RUNNER_TEMP/devices.json" >/dev/null
+            ids="$(/usr/bin/python3 - "$RUNNER_TEMP/devices.json" <<'EOF'
+          import json, sys
+          devices = json.load(open(sys.argv[1]))["result"]["devices"]
+          phones = []
+          for d in devices:
+              hw = d.get("hardwareProperties", {})
+              conn = d.get("connectionProperties", {})
+              is_phone = hw.get("deviceType") == "iPhone" or hw.get("productType", "").startswith("iPhone")
+              if is_phone and hw.get("reality") == "physical" and hw.get("udid") and conn.get("pairingState") == "paired":
+                  phones.append((conn.get("tunnelState") != "connected", hw["udid"]))
+          # Prefer a phone that is connected right now.
+          if phones:
+              print(sorted(phones)[0][1])
+          EOF
+          )"
+          fi
+          if [ -z "$ids" ]; then
+            xcrun devicectl list devices || true
+            echo "::error::No paired iPhone found. Pair it with Xcode on this Mac, or set IPHONE_IDS."; exit 1
+          fi
+          echo "IPHONE_IDS=$ids" >> "$GITHUB_ENV"
+          echo "Installing to $ids"
+
+      - name: Build and sign
+        run: |
+          set -euo pipefail
+          # Automatic signing with the Apple ID in Xcode > Settings > Accounts, as for tinyball.
+          xcodebuild build \
+            -project EnergyBank.xcodeproj -scheme "$SCHEME" \
+            -configuration Debug -destination "generic/platform=iOS" \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            -allowProvisioningUpdates -allowProvisioningDeviceRegistration \
+            DEVELOPMENT_TEAM="$TEAM_ID" CODE_SIGN_STYLE=Automatic \
+            CODE_SIGN_IDENTITY="Apple Development" PROVISIONING_PROFILE_SPECIFIER="" \
+            -quiet
+          app="$(find "$RUNNER_TEMP/dd/Build/Products/Debug-iphoneos" -maxdepth 1 -name '*.app' | head -1)"
+          test -n "$app"
+          echo "APP=$app" >> "$GITHUB_ENV"
+
+      - name: Install on the iPhones
+        if: github.event_name == 'push' || inputs.install
+        run: |
+          set -uo pipefail
+          bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")"
+          # A phone can only run the build if the provisioning profile lists it.
+          profile_devices="$(security cms -D -i "$APP/embedded.mobileprovision" | plutil -extract ProvisionedDevices json -o - -)"
+          first="$(echo "$IPHONE_IDS" | awk '{print $1}')"
+          installed=0
+          for id in $IPHONE_IDS; do
+            if ! grep -q "\"$id\"" <<<"$profile_devices"; then
+              echo "::warning::$id isn't in the provisioning profile, so it can't run this build. Register it with the signing team (docs/IOS_BUILD.md)."
+              continue
+            fi
+            # A phone that is asleep, off or away from the Mac's network fails here; the others still get the build.
+            if ! xcrun devicectl device install app --device "$id" "$APP"; then
+              echo "::warning::Couldn't install on $id (asleep, off or away from the Mac's network?)."
+              continue
+            fi
+            installed=$((installed + 1))
+            # Launch only on the first (your) phone, not on someone else's while they use it.
+            # Fails harmlessly when the phone is locked; the app is installed either way.
+            if [ "$id" = "$first" ]; then
+              xcrun devicectl device process launch --device "$id" --terminate-existing "$bundle_id" || true
+            fi
+          done
+          if [ "$installed" -eq 0 ]; then
+            echo "::error::Couldn't install on any of: $IPHONE_IDS"; exit 1
+          fi
+          echo "Installed on $installed of $(echo $IPHONE_IDS | wc -w | xargs) iPhones."

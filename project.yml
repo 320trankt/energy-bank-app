@@ -1,0 +1,88 @@
+# XcodeGen spec. The .xcodeproj, Info.plists and .entitlements are generated from this (and git-ignored):
+#   brew install xcodegen && xcodegen generate && open EnergyBank.xcodeproj
+# Same com.kalisoft prefix as tinyball, warcell and bite-check. Changing it also means changing the
+# App Group below and AppGroup.identifier in EnergyBankKit.
+name: EnergyBank
+options:
+  bundleIdPrefix: com.kalisoft
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+packages:
+  EnergyBankKit:
+    path: EnergyBankKit
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  EnergyBank:
+    type: application
+    platform: iOS
+    sources:
+      - App
+    dependencies:
+      - package: EnergyBankKit
+      - target: EnergyBankMonitor
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Energy Bank
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSHealthShareUsageDescription: Energy Bank reads your sleep and workouts to estimate how much energy you start the day with and how much you use.
+        ITSAppUsesNonExemptEncryption: false
+    entitlements:
+      path: App/EnergyBank.entitlements
+      properties:
+        com.apple.developer.healthkit: true
+        com.apple.developer.healthkit.access: []
+        com.apple.developer.family-controls: true
+        com.apple.security.application-groups:
+          - group.com.kalisoft.energybank
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.kalisoft.energybank
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
+  # Screen Time threshold callbacks (DeviceActivityMonitor). Writes withdrawals to the App Group.
+  EnergyBankMonitor:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Monitor
+    dependencies:
+      - package: EnergyBankKit
+    info:
+      path: Monitor/Info.plist
+      properties:
+        CFBundleDisplayName: Energy Bank Monitor
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.deviceactivity.monitor-extension
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).EnergyMonitor
+    entitlements:
+      path: Monitor/EnergyBankMonitor.entitlements
+      properties:
+        com.apple.developer.family-controls: true
+        com.apple.security.application-groups:
+          - group.com.kalisoft.energybank
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.kalisoft.energybank.monitor
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
+schemes:
+  EnergyBank:
+    build:
+      targets:
+        EnergyBank: all
+    run:
+      config: Debug
+    archive:
+      config: Release
